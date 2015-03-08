@@ -17,7 +17,7 @@ import argparse
 from tempfile import mkdtemp
 from zipfile import ZipFile
 
-from math import *
+from math import ceil
 
 
 QUALITY = 75
@@ -28,14 +28,11 @@ SRS_GPS_EPSG = 4326
 
 
 def get_extent(raster):
-    cols = raster.RasterXSize
-    rows = raster.RasterYSize
+    (cols, rows) = (raster.RasterXSize, raster.RasterYSize)
 
     geotransform = raster.GetGeoTransform()
-    originX = geotransform[0]
-    originY = geotransform[3]
-    pixelWidth = geotransform[1]
-    pixelHeight = geotransform[5]
+    (originX,    originY)     = (geotransform[0], geotransform[3])
+    (pixelWidth, pixelHeight) = (geotransform[1], geotransform[5])
 
     xMax = originX + cols*pixelWidth
     xMin = originX
@@ -43,13 +40,6 @@ def get_extent(raster):
     yMin = originY - rows*pixelHeight
 
     return (xMax, xMin, yMax, yMin)
-
-
-def get_size(raster):
-    cols = raster.RasterXSize
-    rows = raster.RasterYSize
-
-    return (cols, rows)
 
 
 class Tile(object):
@@ -106,8 +96,7 @@ quality = quality)
         <east>{e}</east><west>{w}</west>
         <rotation>0.0</rotation>
       </LatLonBox>
-    </GroundOverlay>
-""".format(name = self.name, desc = "",
+    </GroundOverlay>""".format(name = self.name, desc = "",
         file = "{0}.jpg".format(self.name), n = north, s = south, e = east, w = west)
 
         return xml
@@ -133,18 +122,20 @@ def main():
     # Create temporary output directory
     workdir = mkdtemp('', "{0}_".format(basename))
 
+    target = None
     if src_srs != trg_srs:
         # Reproject to WGS84
         target = os.path.join(workdir, "{0}.vrt".format(basename))
 
         command = "gdalwarp -of VRT -t_srs EPSG:4326 {src} {trg}".format(src = src, trg = target)
         os.system(command) # TODO: Achieve this with pure Python
+    else:
+        target = src
 
 
     # Get extent
     dataset = gdal.Open(target)
-    (east, west, north, south) = get_extent(dataset)
-    (width, height) = get_size(dataset)
+    (width, height) = (dataset.RasterXSize, dataset.RasterYSize)
 
     # Find tile width
     j_max = 1
@@ -160,13 +151,13 @@ def main():
 
     tile_count = i_max*j_max
     if tile_count > MAX_TILE_NUMBER:
-        print "WARNING: Too many tiles {0}".format(tile_count)
+        print "WARNING: KML can handle 100 tiles max (asking for {0}).".format(tile_count)
 
     print "Creating {0} tiles ({1}x{2}) of {3}x{4} pixels.".format(i_max*j_max, j_max, i_max, tile_width, tile_height)
 
 
     # Build tiles
-    # TODO: Define a Tile class
+    # Parallelize this? chriskiehl.com/article/parallelism-in-one-line
     source = os.path.join(workdir, "{0}.vrt".format(basename))
     tiles = []
     for i in range(i_max):
@@ -188,13 +179,11 @@ def main():
   </Document>
 </kml>
 """
-    xml = ""
-    for tile in tiles:
-        xml += tile.to_kml()
+    xml_body = '\n'.join([t.to_kml() for t in tiles])
 
     kml = open(os.path.join(workdir, "doc.kml"), 'w')
     kml.write(xml_header)
-    kml.write(xml)
+    kml.write(xml_body)
     kml.write(xml_footer)
     kml.close()
 
@@ -215,6 +204,7 @@ def main():
     os.remove(os.path.join(workdir, "doc.kml"))
     kmz.close()
 
+    # Delete temporary output directory
     os.rmdir(workdir)
 
     return 0

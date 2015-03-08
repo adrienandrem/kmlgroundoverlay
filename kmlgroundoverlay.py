@@ -10,21 +10,21 @@
 #
 
 from osgeo import gdal
-from osgeo import gdalconst
+from osgeo import osr
 
 import os
 import argparse
-import tempfile
-import zipfile
+from tempfile import mkdtemp
+from zipfile import ZipFile
 
 from math import *
 
 
-COMPRESSION = .8
+QUALITY = 75
 MAX_WIDTH  = 1024
 MAX_HEIGHT = 1024
-
-
+MAX_TILE_NUMBER = 100
+SRS_GPS_EPSG = 4326
 
 
 def get_extent(raster):
@@ -52,6 +52,67 @@ def get_size(raster):
     return (cols, rows)
 
 
+class Tile(object):
+
+    def __init__(self, i, j, width, height, parent):
+        self.parent = parent
+        self.i = i
+        self.j = j
+        self.name = "{0:0>2d}{1:0>2d}".format(i, j)
+        self.width = width
+        self.height = height
+        self.file = None
+        self.extent = None
+        self.file_aux = None
+        self.file_world = None
+
+    def get_file(self):
+        return self.file
+
+    def get_file_aux(self):
+        return self.file_aux
+
+    def get_file_world(self):
+        return self.file_world
+
+    def generate(self, dir, quality):
+        self.file       = os.path.join(dir, "{0}.jpg".format(self.name))
+        self.file_aux   = os.path.join(dir, "{0}.aux.xml".format(self.file))
+        self.file_world = os.path.join(dir, "{0}.wld".format(self.name))
+
+        command = """gdal_translate -of JPEG -co WORLDFILE=YES -co QUALITY={quality} -expand gray \
+-srcwin {xoff:.0f} {yoff:.0f} {xsize:.0f} {ysize:.0f} \
+{src} {trg}""".format(xoff = self.j*self.width, yoff = self.i*self.height,
+xsize = self.width, ysize = self.height,
+src = self.parent, trg = self.file,
+quality = quality)
+
+        os.system(command) # TODO: Achieve this with pure Python
+
+        dataset = gdal.Open(self.file)
+        self.extent = get_extent(dataset)
+
+        return 0
+
+    def to_kml(self):
+        (east, west, north, south) = self.extent
+        xml = """
+    <GroundOverlay>
+      <name>{name}</name><description>{desc}</description>
+      <drawOrder>30</drawOrder>
+      <Icon><href>{file}</href></Icon>
+      <LatLonBox>
+        <north>{n}</north><south>{s}</south>
+        <east>{e}</east><west>{w}</west>
+        <rotation>0.0</rotation>
+      </LatLonBox>
+    </GroundOverlay>
+""".format(name = self.name, desc = "",
+        file = "{0}.jpg".format(self.name), n = north, s = south, e = east, w = west)
+
+        return xml
+
+
 def main():
 
     parser = argparse.ArgumentParser()
@@ -62,24 +123,28 @@ def main():
     src = args.src
     trg = args.trg
 
-    basedir = os.path.dirname(trg) # print basedir
-    name = os.path.basename(trg) # print name
-    basename = os.path.splitext(name)[0] # print basename
+    name     = os.path.basename(trg)
+    basename = os.path.splitext(name)[0]
 
-#    # Create temporary output directory
-#    out_folder = tempfile.mkdtemp('_tmp', 'gcm_')
-#    out_put = os.path.join(str(out_folder), str(in_file))
-#    input_file = out_put + ".png"
+    src_srs = None
+    trg_srs = osr.SpatialReference()
+    trg_srs.ImportFromEPSG(SRS_GPS_EPSG)
 
-    # Reproject to WGS84
-    target = os.path.join(basedir, "{0}.vrt".format(basename))
-    command = "gdalwarp -of VRT -t_srs EPSG:4326 {src} {trg}".format(src = src, trg = target)
-    os.system(command)
+    # Create temporary output directory
+    workdir = mkdtemp('', "{0}_".format(basename))
+
+    if src_srs != trg_srs:
+        # Reproject to WGS84
+        target = os.path.join(workdir, "{0}.vrt".format(basename))
+
+        command = "gdalwarp -of VRT -t_srs EPSG:4326 {src} {trg}".format(src = src, trg = target)
+        os.system(command) # TODO: Achieve this with pure Python
+
 
     # Get extent
-    dataset = gdal.Open(target) # print dataset.GetMetadata()
+    dataset = gdal.Open(target)
     (east, west, north, south) = get_extent(dataset)
-    (width, height) = get_size(dataset) # print width, height
+    (width, height) = get_size(dataset)
 
     # Find tile width
     j_max = 1
@@ -93,62 +158,64 @@ def main():
         i_max = i_max + 1
     tile_height = ceil(float(height)/float(i_max))
 
+    tile_count = i_max*j_max
+    if tile_count > MAX_TILE_NUMBER:
+        print "WARNING: Too many tiles {0}".format(tile_count)
+
     print "Creating {0} tiles ({1}x{2}) of {3}x{4} pixels.".format(i_max*j_max, j_max, i_max, tile_width, tile_height)
+
 
     # Build tiles
     # TODO: Define a Tile class
+    source = os.path.join(workdir, "{0}.vrt".format(basename))
+    tiles = []
     for i in range(i_max):
         for j in range(j_max):
-            source = os.path.join(basedir, "{0}.vrt".format(basename))
-            target = os.path.join(basedir, "{0}-{1:0>3d}-{2:0>3d}.jpg".format(basename, i, j))
+            tile = Tile(i, j, tile_width, tile_height, source)
+            tile.generate(workdir, QUALITY)
 
-            command = "gdal_translate -of JPEG -co WORLDFILE=YES -co QUALITY=75 -expand gray -srcwin {xoff:.0f} {yoff:.0f} {xsize:.0f} {ysize:.0f} {src} {trg}".format(xoff = j*tile_width, yoff = i*tile_height, xsize = tile_width, ysize = tile_height, src = source, trg = target)
-            os.system(command)
+            tiles.append(tile)
+    os.remove(source)
+
 
     # Build KML
+    print "Building KML..."
     xml_header = """<?xml version="1.0" encoding="UTF-8"?>
 <kml xmlns="http://www.opengis.net/kml/2.2">
-  <Document>
-    <name>{0}</name>
+  <Document><name>{0}</name>
 """.format(basename)
     xml_footer = """
   </Document>
 </kml>
 """
     xml = ""
-    for i in range(i_max):
-        for j in range(j_max):
-            tile = os.path.join(basedir, "{0}-{1:0>3d}-{2:0>3d}.jpg".format(basename, i, j))
-            dataset = gdal.Open(tile) # print dataset.GetMetadata()
-            (east, west, north, south) = get_extent(dataset)
+    for tile in tiles:
+        xml += tile.to_kml()
 
-            xml += """
-  <GroundOverlay>
-    <name>{name}</name>
-    <description>{desc}</description>
-    <drawOrder>30</drawOrder>
-    <Icon><href>{file}</href></Icon>
-    <LatLonBox>
-      <north>{n}</north>
-      <south>{s}</south>
-      <east>{e}</east>
-      <west>{w}</west>
-      <rotation>0.0</rotation>
-    </LatLonBox>
-  </GroundOverlay>
-""".format(name = "{0}-{1:0>3d}-{2:0>3d}".format(basename, i, j), desc = "", file = "{0}-{1:0>3d}-{2:0>3d}.jpg".format(basename, i, j), n = north, s = south, e = east, w = west)
-
-    kml = open(os.path.join(basedir, "{0}.kml".format(basename)), 'w')
+    kml = open(os.path.join(workdir, "doc.kml"), 'w')
     kml.write(xml_header)
     kml.write(xml)
     kml.write(xml_footer)
     kml.close()
 
-#    # Build KMZ
-#    kmz = zipfile.ZipFile("{0}.kmz".format(basename), 'w')
-#    kmz.write(os.path.join(out_folder, t_name), t_name)
-#    os.remove(os.path.join(out_folder, t_name))
 
+    # Build KMZ
+    print "Building KMZ..."
+    kmz = ZipFile(trg, 'w')
+    for tile in tiles:
+        kmz.write(tile.get_file(), os.path.basename(tile.get_file()))
+        os.remove(tile.get_file())
+
+        #kmz.write(tile.get_file_world(), os.path.basename(tile.get_file_world()))
+        #kmz.write(tile.get_file_aux(), os.path.basename(tile.get_file_aux()))
+        os.remove(tile.get_file_world())
+        os.remove(tile.get_file_aux())
+
+    kmz.write(os.path.join(workdir, "doc.kml"), "doc.kml")
+    os.remove(os.path.join(workdir, "doc.kml"))
+    kmz.close()
+
+    os.rmdir(workdir)
 
     return 0
 

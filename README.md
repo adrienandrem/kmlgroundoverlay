@@ -6,4 +6,4 @@ Generate KML raster (GroundOverlay)
 
 # Usage
 
-    kmlgroundoverlay map.tif map.kml
+    kmlgroundoverlay map.tif map.kmz

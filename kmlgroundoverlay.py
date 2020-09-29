@@ -109,7 +109,7 @@ def main():
 
     parser = argparse.ArgumentParser()
     parser.add_argument("src", help="Input raster file (ex.: map.tif)")
-    parser.add_argument("trg", help="Output file (ex.: map.kml)")
+    parser.add_argument("trg", help="Output file (ex.: map.kmz)")
     args = parser.parse_args()
 
     src = args.src
